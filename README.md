@@ -1,62 +1,44 @@
-# 🎀 女朋友專屬一番賞 V3
+# 女朋友專屬一番賞 V4 正式版
 
-這是可長期使用的正式版本，採用 Node.js + PostgreSQL + Cloudinary。
+Node.js + Express + PostgreSQL 的自選號碼一番賞網站。
 
-## 已完成
+## 正式版功能
 
-- 玩家註冊、登入、修改玩家名稱
-- 共用好寶寶印章
-- 管理員發放或扣除印章
-- 多套一番賞、主視覺、活動介紹、每抽印章數
-- 手機相簿圖片上傳並永久保存到 Cloudinary
-- 抽獎前確認與印章餘額預覽
-- 抽獎箱、抽籤券、翻牌結果動畫
-- A 賞彩虹、B 賞金色、C 賞紫色
-- 未中獎哭哭動畫，不使用大獎光效
-- 玩家中獎與抽獎紀錄
-- 一番賞重置鍵：保留設定與歷史，開始下一輪
-- PostgreSQL 交易鎖定，避免同時抽獎造成超抽
+- 玩家註冊、登入及共享好寶寶印章
+- 管理員建立、發布、下架一番賞
+- A賞固定保留，其他獎項可自由新增或刪除
+- 儲存活動時預先隨機洗牌，玩家自行選擇尚未抽出的號碼
+- 已抽號碼永久標記，抽獎紀錄保存籤號、獎項、玩家、時間與彈數
+- 開始下一彈時保留舊抽獎紀錄，重設獎品數量並重新洗牌
+- 管理員查看本彈籤位、調整玩家印章、查看歷史紀錄
+- 匯出完整 JSON 備份
+- Cloudinary 圖片上傳
+- 手機版介面與 A/B/C/未中獎效果
 
-## Render 部署方式
+## Render 必要環境變數
 
-### 1. 上傳到 GitHub
+- `DATABASE_URL`：PostgreSQL 連線字串
+- `JWT_SECRET`：JWT 密鑰
+- `ADMIN_USERNAME`：管理員帳號，預設建議 `admin`
+- `ADMIN_PASSWORD`：管理員密碼
+- `ALLOW_REGISTRATION`：是否開放註冊，填 `true` 或 `false`
 
-把此資料夾內全部檔案上傳到新的 GitHub Repository。
-
-### 2. 建立 Render Blueprint
-
-在 Render 選擇 **New → Blueprint**，連接 Repository。Render 會讀取 `render.yaml`，建立：
-
-- Web Service
-- PostgreSQL Database
-
-### 3. 設定必要環境變數
-
-Render 會要求輸入 `ADMIN_PASSWORD`。請設定你自己的管理員密碼，不要寫在程式或 GitHub 裡。
-
-接著在 Web Service 的 Environment 補上 Cloudinary：
+上傳圖片時還需：
 
 - `CLOUDINARY_CLOUD_NAME`
 - `CLOUDINARY_API_KEY`
 - `CLOUDINARY_API_SECRET`
 
-Cloudinary 免費方案足夠兩人一般使用。未設定 Cloudinary 時網站仍能登入與抽獎，但無法永久上傳圖片。
+## 部署
 
-### 4. 登入位置
+1. 將本專案全部檔案上傳或覆蓋到 GitHub repository 根目錄。
+2. Commit changes。
+3. Render 會自動偵測 GitHub 更新並重新部署。
+4. Render 日誌出現 `Girlfriend Kuji V4 Formal running` 後即可使用。
+5. 玩家網址為 Render 服務網址；管理員後台為服務網址加 `/admin`。
 
-- 玩家頁：網站首頁
-- 管理員頁：`你的網址/admin`
+## 資料安全
 
-管理員帳號由 `ADMIN_USERNAME` 與 `ADMIN_PASSWORD` 建立。登入頁不會顯示或提示密碼。
+升級啟動時只會建立缺少的資料表與欄位，不會主動清除原本玩家、印章或抽獎紀錄。正式使用前仍建議先在管理後台下載一次 JSON 備份。
 
-## 從 V2 升級的重要提醒
-
-V3 改用 PostgreSQL，不能直接沿用 V2 的 SQLite 資料檔。建議先部署為全新服務並測試，再決定是否替換原網址。
-
-## 長期使用注意事項
-
-- 資料存在 PostgreSQL，不會因重新部署程式而消失。
-- 圖片存在 Cloudinary，不會因 Render 重啟而消失。
-- Render 免費 Web Service 可能休眠，第一次開啟需等待一段時間；資料不會因此消失。
-- 免費 PostgreSQL 方案與保留政策可能調整，正式長期使用前請查看 Render 當下方案，或升級付費資料庫。
-- 建議定期從後台保存重要紀錄；未來可再加入 CSV 匯出與自動備份。
+已有歷史抽獎紀錄的一番賞，系統會禁止直接替換獎項，以避免舊紀錄因獎項被刪除而損壞；仍可修改標題、介紹、主圖、每抽印章與上下架狀態。

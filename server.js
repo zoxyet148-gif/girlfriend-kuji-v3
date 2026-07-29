@@ -1,397 +1,48 @@
 require('dotenv').config();
-const express = require('express');
-const path = require('path');
-const multer = require('multer');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const { Pool } = require('pg');
-const { v2: cloudinary } = require('cloudinary');
-
-const app = express();
-const PORT = Number(process.env.PORT || 10000);
-const JWT_SECRET = process.env.JWT_SECRET || 'dev-only-change-this-secret';
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
-
-if (!process.env.DATABASE_URL) {
-  console.error('缺少 DATABASE_URL，請先建立 PostgreSQL 並設定環境變數。');
-  process.exit(1);
-}
-
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
-});
-
-if (process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET) {
-  cloudinary.config({
-    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-    api_key: process.env.CLOUDINARY_API_KEY,
-    api_secret: process.env.CLOUDINARY_API_SECRET
-  });
-}
-
-app.use(express.json({ limit: '2mb' }));
-app.use(express.urlencoded({ extended: true }));
-app.use(express.static(path.join(__dirname, 'public')));
-
-function asyncRoute(fn) {
-  return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
-}
-
-function signToken(user) {
-  return jwt.sign({ id: user.id, role: user.role, username: user.username }, JWT_SECRET, { expiresIn: '30d' });
-}
-
-function auth(requiredRole) {
-  return asyncRoute(async (req, res, next) => {
-    const header = req.headers.authorization || '';
-    const token = header.startsWith('Bearer ') ? header.slice(7) : '';
-    if (!token) return res.status(401).json({ error: '未登入' });
-    try {
-      req.user = jwt.verify(token, JWT_SECRET);
-      if (requiredRole && req.user.role !== requiredRole) return res.status(403).json({ error: '權限不足' });
-      next();
-    } catch {
-      return res.status(401).json({ error: '登入已失效，請重新登入' });
-    }
-  });
-}
-
-async function initDb() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS users (
-      id SERIAL PRIMARY KEY,
-      username VARCHAR(50) UNIQUE NOT NULL,
-      password_hash TEXT NOT NULL,
-      display_name VARCHAR(80) NOT NULL,
-      role VARCHAR(20) NOT NULL DEFAULT 'player',
-      stamps INTEGER NOT NULL DEFAULT 0 CHECK (stamps >= 0),
-      avatar_url TEXT,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    CREATE TABLE IF NOT EXISTS lotteries (
-      id SERIAL PRIMARY KEY,
-      title VARCHAR(120) NOT NULL,
-      description TEXT NOT NULL DEFAULT '',
-      banner_url TEXT,
-      stamp_cost INTEGER NOT NULL DEFAULT 1 CHECK (stamp_cost > 0),
-      status VARCHAR(20) NOT NULL DEFAULT 'draft',
-      round_no INTEGER NOT NULL DEFAULT 1,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    CREATE TABLE IF NOT EXISTS prizes (
-      id SERIAL PRIMARY KEY,
-      lottery_id INTEGER NOT NULL REFERENCES lotteries(id) ON DELETE CASCADE,
-      rank VARCHAR(30) NOT NULL,
-      name VARCHAR(120) NOT NULL,
-      image_url TEXT,
-      initial_quantity INTEGER NOT NULL DEFAULT 1 CHECK (initial_quantity >= 0),
-      remaining_quantity INTEGER NOT NULL DEFAULT 1 CHECK (remaining_quantity >= 0),
-      is_losing BOOLEAN NOT NULL DEFAULT FALSE,
-      sort_order INTEGER NOT NULL DEFAULT 0
-    );
-    CREATE TABLE IF NOT EXISTS draws (
-      id BIGSERIAL PRIMARY KEY,
-      user_id INTEGER NOT NULL REFERENCES users(id),
-      lottery_id INTEGER NOT NULL REFERENCES lotteries(id),
-      prize_id INTEGER NOT NULL REFERENCES prizes(id),
-      round_no INTEGER NOT NULL,
-      stamp_cost INTEGER NOT NULL,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    CREATE TABLE IF NOT EXISTS stamp_logs (
-      id BIGSERIAL PRIMARY KEY,
-      user_id INTEGER NOT NULL REFERENCES users(id),
-      admin_id INTEGER REFERENCES users(id),
-      amount INTEGER NOT NULL,
-      reason TEXT NOT NULL DEFAULT '',
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    CREATE INDEX IF NOT EXISTS idx_draws_user ON draws(user_id, created_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_draws_lottery ON draws(lottery_id, round_no, created_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_prizes_lottery ON prizes(lottery_id, sort_order);
-  `);
-
-  const adminUsername = process.env.ADMIN_USERNAME;
-  const adminPassword = process.env.ADMIN_PASSWORD;
-  if (adminUsername && adminPassword) {
-    const found = await pool.query('SELECT id FROM users WHERE username=$1', [adminUsername]);
-    if (!found.rowCount) {
-      const hash = await bcrypt.hash(adminPassword, 12);
-      await pool.query(
-        `INSERT INTO users(username,password_hash,display_name,role,stamps)
-         VALUES($1,$2,$3,'admin',0)`,
-        [adminUsername, hash, '管理員']
-      );
-      console.log('管理員帳號已建立');
-    }
-  }
-}
-
-async function uploadImage(file) {
-  if (!file) return null;
-  if (!process.env.CLOUDINARY_CLOUD_NAME) throw new Error('尚未設定 Cloudinary，無法永久保存圖片');
-  if (!file.mimetype.startsWith('image/')) throw new Error('只能上傳圖片');
-  return await new Promise((resolve, reject) => {
-    const stream = cloudinary.uploader.upload_stream(
-      { folder: 'girlfriend-kuji', resource_type: 'image', transformation: [{ quality: 'auto', fetch_format: 'auto' }] },
-      (err, result) => err ? reject(err) : resolve(result.secure_url)
-    );
-    stream.end(file.buffer);
-  });
-}
-
-app.get('/api/health', (req, res) => res.json({ ok: true, version: '3.0.0' }));
-
-app.post('/api/auth/register', asyncRoute(async (req, res) => {
-  if (String(process.env.ALLOW_REGISTRATION || 'true').toLowerCase() !== 'true') return res.status(403).json({ error: '目前未開放註冊' });
-  const username = String(req.body.username || '').trim();
-  const password = String(req.body.password || '');
-  const displayName = String(req.body.displayName || username).trim();
-  if (!/^[A-Za-z0-9_]{3,30}$/.test(username)) return res.status(400).json({ error: '帳號需為 3～30 位英數字或底線' });
-  if (password.length < 6) return res.status(400).json({ error: '密碼至少 6 位' });
-  if (!displayName) return res.status(400).json({ error: '請輸入玩家名稱' });
-  const hash = await bcrypt.hash(password, 12);
-  try {
-    const result = await pool.query(
-      `INSERT INTO users(username,password_hash,display_name,role) VALUES($1,$2,$3,'player') RETURNING id,username,display_name,role,stamps`,
-      [username, hash, displayName]
-    );
-    const user = result.rows[0];
-    res.status(201).json({ token: signToken(user), user });
-  } catch (e) {
-    if (e.code === '23505') return res.status(409).json({ error: '帳號已被使用' });
-    throw e;
-  }
-}));
-
-app.post('/api/auth/login', asyncRoute(async (req, res) => {
-  const username = String(req.body.username || '').trim();
-  const password = String(req.body.password || '');
-  const result = await pool.query('SELECT * FROM users WHERE username=$1', [username]);
-  const user = result.rows[0];
-  if (!user || !(await bcrypt.compare(password, user.password_hash))) return res.status(401).json({ error: '帳號或密碼錯誤' });
-  res.json({
-    token: signToken(user),
-    user: { id: user.id, username: user.username, display_name: user.display_name, role: user.role, stamps: user.stamps, avatar_url: user.avatar_url }
-  });
-}));
-
-app.get('/api/me', auth(), asyncRoute(async (req, res) => {
-  const result = await pool.query('SELECT id,username,display_name,role,stamps,avatar_url,created_at FROM users WHERE id=$1', [req.user.id]);
-  if (!result.rowCount) return res.status(404).json({ error: '找不到帳號' });
-  res.json(result.rows[0]);
-}));
-
-app.patch('/api/me', auth(), asyncRoute(async (req, res) => {
-  const displayName = String(req.body.displayName || '').trim();
-  if (!displayName || displayName.length > 80) return res.status(400).json({ error: '玩家名稱格式不正確' });
-  const result = await pool.query('UPDATE users SET display_name=$1 WHERE id=$2 RETURNING id,username,display_name,role,stamps,avatar_url', [displayName, req.user.id]);
-  res.json(result.rows[0]);
-}));
-
-app.get('/api/lotteries', asyncRoute(async (req, res) => {
-  const statusClause = req.query.all === '1' ? '' : "WHERE l.status='published'";
-  const result = await pool.query(`
-    SELECT l.*,
-      COALESCE(SUM(p.remaining_quantity),0)::int AS remaining_total,
-      COALESCE(SUM(p.initial_quantity),0)::int AS initial_total
-    FROM lotteries l LEFT JOIN prizes p ON p.lottery_id=l.id
-    ${statusClause}
-    GROUP BY l.id ORDER BY l.created_at DESC
-  `);
-  res.json(result.rows);
-}));
-
-app.get('/api/lotteries/:id', asyncRoute(async (req, res) => {
-  const lottery = await pool.query('SELECT * FROM lotteries WHERE id=$1', [req.params.id]);
-  if (!lottery.rowCount) return res.status(404).json({ error: '找不到一番賞' });
-  const prizes = await pool.query('SELECT * FROM prizes WHERE lottery_id=$1 ORDER BY sort_order,id', [req.params.id]);
-  res.json({ ...lottery.rows[0], prizes: prizes.rows });
-}));
-
-app.post('/api/lotteries/:id/draw', auth(), asyncRoute(async (req, res) => {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const lotteryR = await client.query('SELECT * FROM lotteries WHERE id=$1 FOR UPDATE', [req.params.id]);
-    if (!lotteryR.rowCount || lotteryR.rows[0].status !== 'published') throw Object.assign(new Error('此一番賞目前不可抽'), { status: 400 });
-    const lottery = lotteryR.rows[0];
-    const userR = await client.query('SELECT * FROM users WHERE id=$1 FOR UPDATE', [req.user.id]);
-    const user = userR.rows[0];
-    if (!user || user.stamps < lottery.stamp_cost) throw Object.assign(new Error('好寶寶印章不足'), { status: 400 });
-
-    const prizeR = await client.query(`
-      SELECT * FROM prizes
-      WHERE lottery_id=$1 AND remaining_quantity>0
-      ORDER BY random() LIMIT 1 FOR UPDATE
-    `, [lottery.id]);
-    if (!prizeR.rowCount) throw Object.assign(new Error('此一番賞已抽完'), { status: 400 });
-    const prize = prizeR.rows[0];
-
-    await client.query('UPDATE users SET stamps=stamps-$1 WHERE id=$2', [lottery.stamp_cost, user.id]);
-    await client.query('UPDATE prizes SET remaining_quantity=remaining_quantity-1 WHERE id=$1', [prize.id]);
-    const drawR = await client.query(`
-      INSERT INTO draws(user_id,lottery_id,prize_id,round_no,stamp_cost)
-      VALUES($1,$2,$3,$4,$5) RETURNING id,created_at
-    `, [user.id, lottery.id, prize.id, lottery.round_no, lottery.stamp_cost]);
-    await client.query('COMMIT');
-    res.json({
-      drawId: drawR.rows[0].id,
-      createdAt: drawR.rows[0].created_at,
-      stampsRemaining: user.stamps - lottery.stamp_cost,
-      prize: { id: prize.id, rank: prize.rank, name: prize.name, image_url: prize.image_url, is_losing: prize.is_losing }
-    });
-  } catch (e) {
-    await client.query('ROLLBACK');
-    res.status(e.status || 500).json({ error: e.message || '抽獎失敗' });
-  } finally {
-    client.release();
-  }
-}));
-
-app.get('/api/me/draws', auth(), asyncRoute(async (req, res) => {
-  const result = await pool.query(`
-    SELECT d.id,d.round_no,d.stamp_cost,d.created_at,l.title,p.rank,p.name,p.image_url,p.is_losing
-    FROM draws d JOIN lotteries l ON l.id=d.lottery_id JOIN prizes p ON p.id=d.prize_id
-    WHERE d.user_id=$1 ORDER BY d.created_at DESC LIMIT 300
-  `, [req.user.id]);
-  res.json(result.rows);
-}));
-
-app.get('/api/admin/users', auth('admin'), asyncRoute(async (req, res) => {
-  const result = await pool.query(`SELECT id,username,display_name,role,stamps,avatar_url,created_at FROM users ORDER BY role DESC,created_at DESC`);
-  res.json(result.rows);
-}));
-
-app.post('/api/admin/users/:id/stamps', auth('admin'), asyncRoute(async (req, res) => {
-  const amount = Number(req.body.amount);
-  const reason = String(req.body.reason || '').trim();
-  if (!Number.isInteger(amount) || amount === 0 || Math.abs(amount) > 100000) return res.status(400).json({ error: '印章數量不正確' });
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const userR = await client.query('SELECT stamps FROM users WHERE id=$1 FOR UPDATE', [req.params.id]);
-    if (!userR.rowCount) throw Object.assign(new Error('找不到玩家'), { status: 404 });
-    if (userR.rows[0].stamps + amount < 0) throw Object.assign(new Error('扣除後不能小於 0'), { status: 400 });
-    const updated = await client.query('UPDATE users SET stamps=stamps+$1 WHERE id=$2 RETURNING id,stamps', [amount, req.params.id]);
-    await client.query('INSERT INTO stamp_logs(user_id,admin_id,amount,reason) VALUES($1,$2,$3,$4)', [req.params.id, req.user.id, amount, reason]);
-    await client.query('COMMIT');
-    res.json(updated.rows[0]);
-  } catch (e) {
-    await client.query('ROLLBACK');
-    res.status(e.status || 500).json({ error: e.message });
-  } finally { client.release(); }
-}));
-
-app.post('/api/admin/upload', auth('admin'), upload.single('image'), asyncRoute(async (req, res) => {
-  const url = await uploadImage(req.file);
-  res.json({ url });
-}));
-
-app.post('/api/admin/lotteries', auth('admin'), asyncRoute(async (req, res) => {
-  const { title, description = '', bannerUrl = null, stampCost = 1, status = 'draft', prizes = [] } = req.body;
-  if (!String(title || '').trim()) return res.status(400).json({ error: '請輸入一番賞名稱' });
-  if (!Array.isArray(prizes) || !prizes.length) return res.status(400).json({ error: '至少需要一個獎項' });
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const lotteryR = await client.query(`INSERT INTO lotteries(title,description,banner_url,stamp_cost,status) VALUES($1,$2,$3,$4,$5) RETURNING *`, [String(title).trim(), description, bannerUrl, Number(stampCost), status]);
-    for (let i = 0; i < prizes.length; i++) {
-      const p = prizes[i];
-      const qty = Number(p.quantity || 0);
-      if (!String(p.rank || '').trim() || !String(p.name || '').trim() || !Number.isInteger(qty) || qty < 0) throw new Error('獎項資料不完整');
-      await client.query(`INSERT INTO prizes(lottery_id,rank,name,image_url,initial_quantity,remaining_quantity,is_losing,sort_order) VALUES($1,$2,$3,$4,$5,$5,$6,$7)`, [lotteryR.rows[0].id, String(p.rank).trim(), String(p.name).trim(), p.imageUrl || null, qty, Boolean(p.isLosing), i]);
-    }
-    await client.query('COMMIT');
-    res.status(201).json(lotteryR.rows[0]);
-  } catch (e) {
-    await client.query('ROLLBACK');
-    res.status(400).json({ error: e.message });
-  } finally { client.release(); }
-}));
-
-app.put('/api/admin/lotteries/:id', auth('admin'), asyncRoute(async (req, res) => {
-  const { title, description = '', bannerUrl = null, stampCost = 1, status = 'draft', prizes = [] } = req.body;
-  if (!String(title || '').trim() || !Array.isArray(prizes) || !prizes.length) return res.status(400).json({ error: '資料不完整' });
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const drawCount = await client.query('SELECT COUNT(*)::int AS count FROM draws WHERE lottery_id=$1 AND round_no=(SELECT round_no FROM lotteries WHERE id=$1)', [req.params.id]);
-    if (drawCount.rows[0].count > 0) {
-      const old = await client.query('SELECT id,initial_quantity,remaining_quantity FROM prizes WHERE lottery_id=$1 ORDER BY sort_order,id', [req.params.id]);
-      if (old.rows.length !== prizes.length) throw new Error('本輪已開始抽獎，請先重置後再增減獎項');
-      for (let i = 0; i < old.rows.length; i++) {
-        const consumed = old.rows[i].initial_quantity - old.rows[i].remaining_quantity;
-        if (Number(prizes[i].quantity) < consumed) throw new Error('新數量不能少於本輪已抽出的數量');
-      }
-    }
-    await client.query(`UPDATE lotteries SET title=$1,description=$2,banner_url=$3,stamp_cost=$4,status=$5,updated_at=NOW() WHERE id=$6`, [String(title).trim(), description, bannerUrl, Number(stampCost), status, req.params.id]);
-    const oldPrizes = await client.query('SELECT * FROM prizes WHERE lottery_id=$1 ORDER BY sort_order,id', [req.params.id]);
-    if (drawCount.rows[0].count === 0) await client.query('DELETE FROM prizes WHERE lottery_id=$1', [req.params.id]);
-    for (let i = 0; i < prizes.length; i++) {
-      const p = prizes[i];
-      const qty = Number(p.quantity || 0);
-      if (drawCount.rows[0].count === 0) {
-        await client.query(`INSERT INTO prizes(lottery_id,rank,name,image_url,initial_quantity,remaining_quantity,is_losing,sort_order) VALUES($1,$2,$3,$4,$5,$5,$6,$7)`, [req.params.id,p.rank,p.name,p.imageUrl||null,qty,Boolean(p.isLosing),i]);
-      } else {
-        const old = oldPrizes.rows[i];
-        const consumed = old.initial_quantity - old.remaining_quantity;
-        await client.query(`UPDATE prizes SET rank=$1,name=$2,image_url=$3,initial_quantity=$4,remaining_quantity=$5,is_losing=$6,sort_order=$7 WHERE id=$8`, [p.rank,p.name,p.imageUrl||null,qty,qty-consumed,Boolean(p.isLosing),i,old.id]);
-      }
-    }
-    await client.query('COMMIT');
-    res.json({ ok: true });
-  } catch (e) {
-    await client.query('ROLLBACK');
-    res.status(400).json({ error: e.message });
-  } finally { client.release(); }
-}));
-
-app.post('/api/admin/lotteries/:id/reset', auth('admin'), asyncRoute(async (req, res) => {
-  if (String(req.body.confirm || '') !== 'RESET') return res.status(400).json({ error: '請輸入 RESET 確認重置' });
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const result = await client.query('UPDATE lotteries SET round_no=round_no+1,updated_at=NOW() WHERE id=$1 RETURNING round_no', [req.params.id]);
-    if (!result.rowCount) throw Object.assign(new Error('找不到一番賞'), { status: 404 });
-    await client.query('UPDATE prizes SET remaining_quantity=initial_quantity WHERE lottery_id=$1', [req.params.id]);
-    await client.query('COMMIT');
-    res.json({ ok: true, roundNo: result.rows[0].round_no });
-  } catch (e) {
-    await client.query('ROLLBACK');
-    res.status(e.status || 500).json({ error: e.message });
-  } finally { client.release(); }
-}));
-
-app.delete('/api/admin/lotteries/:id', auth('admin'), asyncRoute(async (req, res) => {
-  const count = await pool.query('SELECT COUNT(*)::int AS count FROM draws WHERE lottery_id=$1', [req.params.id]);
-  if (count.rows[0].count > 0) return res.status(400).json({ error: '已有抽獎紀錄，請改為下架，不建議刪除' });
-  await pool.query('DELETE FROM lotteries WHERE id=$1', [req.params.id]);
-  res.json({ ok: true });
-}));
-
-app.get('/api/admin/logs', auth('admin'), asyncRoute(async (req, res) => {
-  const draws = await pool.query(`SELECT d.id,d.round_no,d.stamp_cost,d.created_at,u.display_name,l.title,p.rank,p.name FROM draws d JOIN users u ON u.id=d.user_id JOIN lotteries l ON l.id=d.lottery_id JOIN prizes p ON p.id=d.prize_id ORDER BY d.created_at DESC LIMIT 500`);
-  const stamps = await pool.query(`SELECT s.id,s.amount,s.reason,s.created_at,u.display_name,a.display_name AS admin_name FROM stamp_logs s JOIN users u ON u.id=s.user_id LEFT JOIN users a ON a.id=s.admin_id ORDER BY s.created_at DESC LIMIT 500`);
-  res.json({ draws: draws.rows, stamps: stamps.rows });
-}));
-
-app.get('/admin', (req, res) =>
-  res.sendFile(path.join(__dirname, 'public', 'admin.html'))
-);
-
-app.get('/{*splat}', (req, res) =>
-  res.sendFile(path.join(__dirname, 'public', 'index.html'))
-);
-
-app.use((err, req, res, next) => {
-  console.error(err);
-  res.status(500).json({ error: err.message || '伺服器錯誤' });
-});
-
-initDb().then(() => app.listen(PORT, () => console.log(`Girlfriend Kuji V3 running on port ${PORT}`))).catch(err => {
-  console.error('資料庫初始化失敗', err);
-  process.exit(1);
-});
+const express=require('express');const path=require('path');const crypto=require('crypto');const multer=require('multer');const bcrypt=require('bcryptjs');const jwt=require('jsonwebtoken');const {Pool}=require('pg');const {v2:cloudinary}=require('cloudinary');
+const app=express(),PORT=Number(process.env.PORT||10000),JWT_SECRET=process.env.JWT_SECRET||'dev-only-change-this-secret';
+const upload=multer({storage:multer.memoryStorage(),limits:{fileSize:8*1024*1024}});
+if(!process.env.DATABASE_URL){console.error('缺少 DATABASE_URL');process.exit(1)}
+const pool=new Pool({connectionString:process.env.DATABASE_URL,ssl:process.env.NODE_ENV==='production'?{rejectUnauthorized:false}:false});
+if(process.env.CLOUDINARY_CLOUD_NAME&&process.env.CLOUDINARY_API_KEY&&process.env.CLOUDINARY_API_SECRET)cloudinary.config({cloud_name:process.env.CLOUDINARY_CLOUD_NAME,api_key:process.env.CLOUDINARY_API_KEY,api_secret:process.env.CLOUDINARY_API_SECRET});
+app.use(express.json({limit:'4mb'}));app.use(express.urlencoded({extended:true}));app.use('/api',(req,res,next)=>{res.setHeader('Cache-Control','no-store');next()});app.use(express.static(path.join(__dirname,'public')));
+const asyncRoute=fn=>(req,res,next)=>Promise.resolve(fn(req,res,next)).catch(next);
+const signToken=u=>jwt.sign({id:u.id,role:u.role,username:u.username},JWT_SECRET,{expiresIn:'30d'});
+function auth(role){return asyncRoute(async(req,res,next)=>{const h=req.headers.authorization||'',t=h.startsWith('Bearer ')?h.slice(7):'';if(!t)return res.status(401).json({error:'未登入'});try{req.user=jwt.verify(t,JWT_SECRET);if(role&&req.user.role!==role)return res.status(403).json({error:'權限不足'});next()}catch{return res.status(401).json({error:'登入已失效，請重新登入'})}})}
+function optionalAuth(req,res,next){const h=req.headers.authorization||'',t=h.startsWith('Bearer ')?h.slice(7):'';if(!t)return next();try{req.user=jwt.verify(t,JWT_SECRET)}catch{}next()}
+async function initDb(){await pool.query(`
+CREATE TABLE IF NOT EXISTS users(id SERIAL PRIMARY KEY,username VARCHAR(50) UNIQUE NOT NULL,password_hash TEXT NOT NULL,display_name VARCHAR(80) NOT NULL,role VARCHAR(20) NOT NULL DEFAULT 'player',stamps INTEGER NOT NULL DEFAULT 0 CHECK(stamps>=0),avatar_url TEXT,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+CREATE TABLE IF NOT EXISTS lotteries(id SERIAL PRIMARY KEY,title VARCHAR(120) NOT NULL,description TEXT NOT NULL DEFAULT '',banner_url TEXT,stamp_cost INTEGER NOT NULL DEFAULT 1 CHECK(stamp_cost>0),status VARCHAR(20) NOT NULL DEFAULT 'draft',round_no INTEGER NOT NULL DEFAULT 1,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+CREATE TABLE IF NOT EXISTS prizes(id SERIAL PRIMARY KEY,lottery_id INTEGER NOT NULL REFERENCES lotteries(id) ON DELETE CASCADE,rank VARCHAR(30) NOT NULL,name VARCHAR(120) NOT NULL,image_url TEXT,initial_quantity INTEGER NOT NULL DEFAULT 1 CHECK(initial_quantity>=0),remaining_quantity INTEGER NOT NULL DEFAULT 1 CHECK(remaining_quantity>=0),is_losing BOOLEAN NOT NULL DEFAULT FALSE,effect VARCHAR(20) NOT NULL DEFAULT 'none',sort_order INTEGER NOT NULL DEFAULT 0);
+ALTER TABLE prizes ADD COLUMN IF NOT EXISTS effect VARCHAR(20) NOT NULL DEFAULT 'none';
+CREATE TABLE IF NOT EXISTS draws(id BIGSERIAL PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),lottery_id INTEGER NOT NULL REFERENCES lotteries(id),prize_id INTEGER NOT NULL REFERENCES prizes(id),round_no INTEGER NOT NULL,stamp_cost INTEGER NOT NULL,ticket_number INTEGER,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+ALTER TABLE draws ADD COLUMN IF NOT EXISTS ticket_number INTEGER;
+CREATE TABLE IF NOT EXISTS lottery_tickets(id BIGSERIAL PRIMARY KEY,lottery_id INTEGER NOT NULL REFERENCES lotteries(id) ON DELETE CASCADE,round_no INTEGER NOT NULL,ticket_number INTEGER NOT NULL,prize_id INTEGER NOT NULL REFERENCES prizes(id) ON DELETE CASCADE,is_drawn BOOLEAN NOT NULL DEFAULT FALSE,drawn_by INTEGER REFERENCES users(id),drawn_at TIMESTAMPTZ,UNIQUE(lottery_id,round_no,ticket_number));
+CREATE TABLE IF NOT EXISTS stamp_logs(id BIGSERIAL PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),admin_id INTEGER REFERENCES users(id),amount INTEGER NOT NULL,reason TEXT NOT NULL DEFAULT '',created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+CREATE INDEX IF NOT EXISTS idx_tickets_round ON lottery_tickets(lottery_id,round_no,ticket_number);CREATE INDEX IF NOT EXISTS idx_draws_user ON draws(user_id,created_at DESC);`);
+const au=process.env.ADMIN_USERNAME,ap=process.env.ADMIN_PASSWORD;if(au&&ap){const hash=await bcrypt.hash(ap,12);const f=await pool.query('SELECT id,role FROM users WHERE username=$1',[au]);if(!f.rowCount){await pool.query("INSERT INTO users(username,password_hash,display_name,role,stamps) VALUES($1,$2,'管理員','admin',0)",[au,hash]);console.log('管理員帳號已建立')}else{await pool.query("UPDATE users SET password_hash=$1,role='admin' WHERE username=$2",[hash,au]);console.log('管理員帳號已同步')}}}
+async function uploadImage(file){if(!file)return null;if(!process.env.CLOUDINARY_CLOUD_NAME)throw new Error('尚未設定 Cloudinary');if(!file.mimetype.startsWith('image/'))throw new Error('只能上傳圖片');return new Promise((resolve,reject)=>{const s=cloudinary.uploader.upload_stream({folder:'girlfriend-kuji',resource_type:'image',transformation:[{quality:'auto',fetch_format:'auto'}]},(e,r)=>e?reject(e):resolve(r.secure_url));s.end(file.buffer)})}
+async function generateTickets(client,lotteryId,roundNo){await client.query('DELETE FROM lottery_tickets WHERE lottery_id=$1 AND round_no=$2',[lotteryId,roundNo]);const ps=(await client.query('SELECT id,initial_quantity FROM prizes WHERE lottery_id=$1 ORDER BY sort_order,id',[lotteryId])).rows;const bag=[];for(const p of ps)for(let i=0;i<p.initial_quantity;i++)bag.push(p.id);for(let i=bag.length-1;i>0;i--){const j=crypto.randomInt(i+1);[bag[i],bag[j]]=[bag[j],bag[i]]}for(let i=0;i<bag.length;i++)await client.query('INSERT INTO lottery_tickets(lottery_id,round_no,ticket_number,prize_id) VALUES($1,$2,$3,$4)',[lotteryId,roundNo,i+1,bag[i]]);return bag.length}
+app.get('/api/health',(req,res)=>res.json({ok:true,version:'4.0.0-dev2'}));
+app.post('/api/auth/register',asyncRoute(async(req,res)=>{if(String(process.env.ALLOW_REGISTRATION||'true').toLowerCase()!=='true')return res.status(403).json({error:'目前未開放註冊'});const username=String(req.body.username||'').trim(),password=String(req.body.password||''),displayName=String(req.body.displayName||username).trim();if(!/^[A-Za-z0-9_]{3,30}$/.test(username))return res.status(400).json({error:'帳號需為 3～30 位英數字或底線'});if(password.length<6)return res.status(400).json({error:'密碼至少 6 位'});const hash=await bcrypt.hash(password,12);try{const r=await pool.query("INSERT INTO users(username,password_hash,display_name,role) VALUES($1,$2,$3,'player') RETURNING id,username,display_name,role,stamps",[username,hash,displayName]);res.status(201).json({token:signToken(r.rows[0]),user:r.rows[0]})}catch(e){if(e.code==='23505')return res.status(409).json({error:'帳號已被使用'});throw e}}));
+app.post('/api/auth/login',asyncRoute(async(req,res)=>{const r=await pool.query('SELECT * FROM users WHERE username=$1',[String(req.body.username||'').trim()]),u=r.rows[0];if(!u||!(await bcrypt.compare(String(req.body.password||''),u.password_hash)))return res.status(401).json({error:'帳號或密碼錯誤'});res.json({token:signToken(u),user:{id:u.id,username:u.username,display_name:u.display_name,role:u.role,stamps:u.stamps,avatar_url:u.avatar_url}})}));
+app.get('/api/me',auth(),asyncRoute(async(req,res)=>{const r=await pool.query('SELECT id,username,display_name,role,stamps,avatar_url,created_at FROM users WHERE id=$1',[req.user.id]);res.json(r.rows[0])}));
+app.patch('/api/me',auth(),asyncRoute(async(req,res)=>{const n=String(req.body.displayName||'').trim();if(!n)return res.status(400).json({error:'名稱不能空白'});const r=await pool.query('UPDATE users SET display_name=$1 WHERE id=$2 RETURNING id,username,display_name,role,stamps,avatar_url',[n,req.user.id]);res.json(r.rows[0])}));
+app.get('/api/lotteries',optionalAuth,asyncRoute(async(req,res)=>{const wantsAll=req.query.all==='1';if(wantsAll&&req.user?.role!=='admin')return res.status(403).json({error:'權限不足'});const where=wantsAll?'':"WHERE l.status='published'";const r=await pool.query(`SELECT l.*,CASE WHEN (SELECT COUNT(*) FROM lottery_tickets t WHERE t.lottery_id=l.id AND t.round_no=l.round_no)>0 THEN (SELECT COUNT(*) FROM lottery_tickets t WHERE t.lottery_id=l.id AND t.round_no=l.round_no AND NOT t.is_drawn) ELSE COALESCE(SUM(p.remaining_quantity),0) END::int remaining_total,CASE WHEN (SELECT COUNT(*) FROM lottery_tickets t WHERE t.lottery_id=l.id AND t.round_no=l.round_no)>0 THEN (SELECT COUNT(*) FROM lottery_tickets t WHERE t.lottery_id=l.id AND t.round_no=l.round_no) ELSE COALESCE(SUM(p.initial_quantity),0) END::int initial_total FROM lotteries l LEFT JOIN prizes p ON p.lottery_id=l.id ${where} GROUP BY l.id ORDER BY l.created_at DESC`);res.json(r.rows)}));
+app.get('/api/lotteries/:id',optionalAuth,asyncRoute(async(req,res)=>{const lr=await pool.query('SELECT * FROM lotteries WHERE id=$1',[req.params.id]);if(!lr.rowCount)return res.status(404).json({error:'找不到一番賞'});const l=lr.rows[0];if(l.status!=='published'&&req.user?.role!=='admin')return res.status(404).json({error:'找不到一番賞'});const ps=await pool.query('SELECT * FROM prizes WHERE lottery_id=$1 ORDER BY sort_order,id',[l.id]);let ts=await pool.query('SELECT ticket_number,is_drawn FROM lottery_tickets WHERE lottery_id=$1 AND round_no=$2 ORDER BY ticket_number',[l.id,l.round_no]);if(!ts.rowCount&&ps.rows.reduce((s,p)=>s+p.initial_quantity,0)>0){const c=await pool.connect();try{await c.query('BEGIN');await generateTickets(c,l.id,l.round_no);await c.query('COMMIT')}catch(e){await c.query('ROLLBACK');throw e}finally{c.release()}ts=await pool.query('SELECT ticket_number,is_drawn FROM lottery_tickets WHERE lottery_id=$1 AND round_no=$2 ORDER BY ticket_number',[l.id,l.round_no])}res.json({...l,prizes:ps.rows,tickets:ts.rows})}));
+app.post('/api/lotteries/:id/draw',auth(),asyncRoute(async(req,res)=>{const ticketNumber=Number(req.body.ticketNumber);if(!Number.isInteger(ticketNumber)||ticketNumber<1)return res.status(400).json({error:'請先選擇號碼'});const c=await pool.connect();try{await c.query('BEGIN');const lr=await c.query('SELECT * FROM lotteries WHERE id=$1 FOR UPDATE',[req.params.id]);if(!lr.rowCount||lr.rows[0].status!=='published')throw Object.assign(new Error('此一番賞目前不可抽'),{status:400});const l=lr.rows[0],ur=await c.query('SELECT * FROM users WHERE id=$1 FOR UPDATE',[req.user.id]),u=ur.rows[0];if(u.stamps<l.stamp_cost)throw Object.assign(new Error('好寶寶印章不足'),{status:400});let tr=await c.query(`SELECT t.*,p.rank,p.name,p.image_url,p.is_losing,p.effect FROM lottery_tickets t JOIN prizes p ON p.id=t.prize_id WHERE t.lottery_id=$1 AND t.round_no=$2 AND t.ticket_number=$3 FOR UPDATE`,[l.id,l.round_no,ticketNumber]);if(!tr.rowCount)throw Object.assign(new Error('找不到這張籤'),{status:404});const t=tr.rows[0];if(t.is_drawn)throw Object.assign(new Error('這個號碼已經被抽走了'),{status:409});await c.query('UPDATE users SET stamps=stamps-$1 WHERE id=$2',[l.stamp_cost,u.id]);await c.query('UPDATE prizes SET remaining_quantity=GREATEST(remaining_quantity-1,0) WHERE id=$1',[t.prize_id]);await c.query('UPDATE lottery_tickets SET is_drawn=TRUE,drawn_by=$1,drawn_at=NOW() WHERE id=$2',[u.id,t.id]);const dr=await c.query('INSERT INTO draws(user_id,lottery_id,prize_id,round_no,stamp_cost,ticket_number) VALUES($1,$2,$3,$4,$5,$6) RETURNING id,created_at',[u.id,l.id,t.prize_id,l.round_no,l.stamp_cost,ticketNumber]);const rem=(await c.query('SELECT COUNT(*)::int n FROM lottery_tickets WHERE lottery_id=$1 AND round_no=$2 AND NOT is_drawn',[l.id,l.round_no])).rows[0].n;await c.query('COMMIT');res.json({drawId:dr.rows[0].id,createdAt:dr.rows[0].created_at,ticketNumber,remainingTickets:rem,stampsRemaining:u.stamps-l.stamp_cost,prize:{id:t.prize_id,rank:t.rank,name:t.name,image_url:t.image_url,is_losing:t.is_losing,effect:t.effect||'none'}})}catch(e){await c.query('ROLLBACK');res.status(e.status||500).json({error:e.message||'抽獎失敗'})}finally{c.release()}}));
+app.get('/api/me/draws',auth(),asyncRoute(async(req,res)=>{const r=await pool.query('SELECT d.id,d.round_no,d.stamp_cost,d.ticket_number,d.created_at,l.title,p.rank,p.name,p.image_url,p.is_losing FROM draws d JOIN lotteries l ON l.id=d.lottery_id JOIN prizes p ON p.id=d.prize_id WHERE d.user_id=$1 ORDER BY d.created_at DESC LIMIT 300',[req.user.id]);res.json(r.rows)}));
+app.get('/api/admin/users',auth('admin'),asyncRoute(async(req,res)=>res.json((await pool.query('SELECT id,username,display_name,role,stamps,avatar_url,created_at FROM users ORDER BY role DESC,created_at DESC')).rows)));
+app.post('/api/admin/users/:id/stamps',auth('admin'),asyncRoute(async(req,res)=>{const amount=Number(req.body.amount),reason=String(req.body.reason||'');if(!Number.isInteger(amount)||amount===0)return res.status(400).json({error:'印章數量不正確'});const c=await pool.connect();try{await c.query('BEGIN');const u=await c.query('SELECT stamps FROM users WHERE id=$1 FOR UPDATE',[req.params.id]);if(!u.rowCount)throw new Error('找不到玩家');if(u.rows[0].stamps+amount<0)throw new Error('扣除後不能小於 0');const r=await c.query('UPDATE users SET stamps=stamps+$1 WHERE id=$2 RETURNING id,stamps',[amount,req.params.id]);await c.query('INSERT INTO stamp_logs(user_id,admin_id,amount,reason) VALUES($1,$2,$3,$4)',[req.params.id,req.user.id,amount,reason]);await c.query('COMMIT');res.json(r.rows[0])}catch(e){await c.query('ROLLBACK');res.status(400).json({error:e.message})}finally{c.release()}}));
+app.post('/api/admin/upload',auth('admin'),upload.single('image'),asyncRoute(async(req,res)=>res.json({url:await uploadImage(req.file)})));
+function validateLotteryInput({title,stampCost,status,prizes}){if(!String(title||'').trim())throw new Error('活動名稱不能空白');const cost=Number(stampCost);if(!Number.isInteger(cost)||cost<1)throw new Error('每抽印章必須是大於 0 的整數');if(!['draft','published','closed'].includes(status))throw new Error('活動狀態不正確');if(!Array.isArray(prizes)||!prizes.length)throw new Error('至少需要一個獎項');if(String(prizes[0].rank||'').trim()!=='A賞')throw new Error('第一個獎項必須固定為 A賞');let total=0;const effects=new Set(['none','rainbow','gold','purple','pink','cry']);for(const p of prizes){const q=Number(p.quantity);if(!String(p.rank||'').trim()||!String(p.name||'').trim()||!Number.isInteger(q)||q<0)throw new Error('獎項資料不完整');if(!effects.has(String(p.effect||'none')))throw new Error('獎項特效不正確');total+=q}if(Number(prizes[0].quantity)<1)throw new Error('A賞數量至少要 1 個');if(total<1)throw new Error('總籤數至少要 1 張')}
+function prizeShape(rows){return rows.map(p=>({rank:String(p.rank).trim(),name:String(p.name).trim(),quantity:Number(p.quantity??p.initial_quantity),imageUrl:p.imageUrl??p.image_url??null,isLosing:!!(p.isLosing??p.is_losing),effect:String(p.effect||'none')}))}
+app.post('/api/admin/lotteries',auth('admin'),asyncRoute(async(req,res)=>{const {title,description='',bannerUrl=null,stampCost=1,status='draft',prizes=[]}=req.body;validateLotteryInput({title,stampCost,status,prizes});const c=await pool.connect();try{await c.query('BEGIN');const l=(await c.query('INSERT INTO lotteries(title,description,banner_url,stamp_cost,status) VALUES($1,$2,$3,$4,$5) RETURNING *',[String(title).trim(),description,bannerUrl,Number(stampCost),status])).rows[0];for(let i=0;i<prizes.length;i++){const p=prizes[i],q=Number(p.quantity);await c.query('INSERT INTO prizes(lottery_id,rank,name,image_url,initial_quantity,remaining_quantity,is_losing,effect,sort_order) VALUES($1,$2,$3,$4,$5,$5,$6,$7,$8)',[l.id,p.rank.trim(),p.name.trim(),p.imageUrl||null,q,!!p.isLosing,String(p.effect||'none'),i])}await generateTickets(c,l.id,l.round_no);await c.query('COMMIT');res.status(201).json(l)}catch(e){await c.query('ROLLBACK');res.status(400).json({error:e.message})}finally{c.release()}}));
+app.put('/api/admin/lotteries/:id',auth('admin'),asyncRoute(async(req,res)=>{const {title,description='',bannerUrl=null,stampCost=1,status='draft',prizes=[]}=req.body;validateLotteryInput({title,stampCost,status,prizes});const c=await pool.connect();try{await c.query('BEGIN');const lr=await c.query('SELECT * FROM lotteries WHERE id=$1 FOR UPDATE',[req.params.id]);if(!lr.rowCount)throw new Error('找不到一番賞');const drawn=(await c.query('SELECT COUNT(*)::int n FROM lottery_tickets WHERE lottery_id=$1 AND round_no=$2 AND is_drawn',[req.params.id,lr.rows[0].round_no])).rows[0].n;if(drawn>0)throw new Error('本輪已開始抽獎，獎項內容不可修改；請先開始下一彈');const allDraws=(await c.query('SELECT COUNT(*)::int n FROM draws WHERE lottery_id=$1',[req.params.id])).rows[0].n;const existing=(await c.query('SELECT rank,name,image_url,initial_quantity,is_losing,effect FROM prizes WHERE lottery_id=$1 ORDER BY sort_order,id',[req.params.id])).rows;const changed=JSON.stringify(prizeShape(existing))!==JSON.stringify(prizeShape(prizes));if(allDraws>0&&changed)throw new Error('為了保留歷代中獎紀錄，已有抽獎紀錄的一番賞不能更換獎項；可以修改標題、介紹、圖片、印章與狀態');await c.query('UPDATE lotteries SET title=$1,description=$2,banner_url=$3,stamp_cost=$4,status=$5,updated_at=NOW() WHERE id=$6',[String(title).trim(),description,bannerUrl,Number(stampCost),status,req.params.id]);if(!changed){await c.query('COMMIT');return res.json({ok:true,metadataOnly:true})}await c.query('DELETE FROM prizes WHERE lottery_id=$1',[req.params.id]);for(let i=0;i<prizes.length;i++){const p=prizes[i],q=Number(p.quantity);await c.query('INSERT INTO prizes(lottery_id,rank,name,image_url,initial_quantity,remaining_quantity,is_losing,effect,sort_order) VALUES($1,$2,$3,$4,$5,$5,$6,$7,$8)',[req.params.id,p.rank.trim(),p.name.trim(),p.imageUrl||null,q,!!p.isLosing,String(p.effect||'none'),i])}await generateTickets(c,req.params.id,lr.rows[0].round_no);await c.query('COMMIT');res.json({ok:true})}catch(e){await c.query('ROLLBACK');res.status(400).json({error:e.message})}finally{c.release()}}));
+app.post('/api/admin/lotteries/:id/reset',auth('admin'),asyncRoute(async(req,res)=>{if(String(req.body.confirm)!=='RESET')return res.status(400).json({error:'請輸入 RESET'});const c=await pool.connect();try{await c.query('BEGIN');const r=await c.query('UPDATE lotteries SET round_no=round_no+1,updated_at=NOW() WHERE id=$1 RETURNING round_no',[req.params.id]);if(!r.rowCount)throw new Error('找不到一番賞');await c.query('UPDATE prizes SET remaining_quantity=initial_quantity WHERE lottery_id=$1',[req.params.id]);await generateTickets(c,req.params.id,r.rows[0].round_no);await c.query('COMMIT');res.json({ok:true,roundNo:r.rows[0].round_no})}catch(e){await c.query('ROLLBACK');res.status(400).json({error:e.message})}finally{c.release()}}));
+app.get('/api/admin/lotteries/:id/tickets',auth('admin'),asyncRoute(async(req,res)=>{const l=(await pool.query('SELECT round_no FROM lotteries WHERE id=$1',[req.params.id])).rows[0];if(!l)return res.status(404).json({error:'找不到一番賞'});const r=await pool.query(`SELECT t.ticket_number,t.is_drawn,t.drawn_at,p.rank,p.name,u.display_name FROM lottery_tickets t JOIN prizes p ON p.id=t.prize_id LEFT JOIN users u ON u.id=t.drawn_by WHERE t.lottery_id=$1 AND t.round_no=$2 ORDER BY t.ticket_number`,[req.params.id,l.round_no]);res.json(r.rows)}));
+app.delete('/api/admin/lotteries/:id',auth('admin'),asyncRoute(async(req,res)=>{const n=(await pool.query('SELECT COUNT(*)::int n FROM draws WHERE lottery_id=$1',[req.params.id])).rows[0].n;if(n>0)return res.status(400).json({error:'已有抽獎紀錄，請改為下架'});await pool.query('DELETE FROM lotteries WHERE id=$1',[req.params.id]);res.json({ok:true})}));
+app.get('/api/admin/logs',auth('admin'),asyncRoute(async(req,res)=>{const draws=(await pool.query('SELECT d.id,d.round_no,d.ticket_number,d.stamp_cost,d.created_at,u.display_name,l.title,p.rank,p.name FROM draws d JOIN users u ON u.id=d.user_id JOIN lotteries l ON l.id=d.lottery_id JOIN prizes p ON p.id=d.prize_id ORDER BY d.created_at DESC LIMIT 500')).rows;const stamps=(await pool.query('SELECT s.id,s.amount,s.reason,s.created_at,u.display_name,a.display_name admin_name FROM stamp_logs s JOIN users u ON u.id=s.user_id LEFT JOIN users a ON a.id=s.admin_id ORDER BY s.created_at DESC LIMIT 500')).rows;res.json({draws,stamps})}));
+app.get('/api/admin/backup',auth('admin'),asyncRoute(async(req,res)=>{const [users,lotteries,prizes,draws,stamps,tickets]=await Promise.all(['users','lotteries','prizes','draws','stamp_logs','lottery_tickets'].map(t=>pool.query(`SELECT * FROM ${t}`)));res.setHeader('Content-Disposition',`attachment; filename=kuji-backup-${Date.now()}.json`);res.json({version:4,exportedAt:new Date().toISOString(),users:users.rows,lotteries:lotteries.rows,prizes:prizes.rows,draws:draws.rows,stampLogs:stamps.rows,tickets:tickets.rows})}));
+app.get('/admin',(req,res)=>res.sendFile(path.join(__dirname,'public','admin.html')));app.get('/{*splat}',(req,res)=>res.sendFile(path.join(__dirname,'public','index.html')));app.use((err,req,res,next)=>{console.error(err);res.status(500).json({error:err.message||'伺服器錯誤'})});
+initDb().then(()=>app.listen(PORT,()=>console.log(`Girlfriend Kuji V4 Formal running on port ${PORT}`))).catch(e=>{console.error(e);process.exit(1)});
