@@ -378,8 +378,13 @@ app.get('/api/admin/logs', auth('admin'), asyncRoute(async (req, res) => {
   res.json({ draws: draws.rows, stamps: stamps.rows });
 }));
 
-app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, 'public', 'admin.html')));
-app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
+app.get('/admin', (req, res) =>
+  res.sendFile(path.join(__dirname, 'public', 'admin.html'))
+);
+
+app.get('/{*splat}', (req, res) =>
+  res.sendFile(path.join(__dirname, 'public', 'index.html'))
+);
 
 app.use((err, req, res, next) => {
   console.error(err);
