@@ -48,3 +48,36 @@
 .reward-ticket-list{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:10px 0}
 .reward-ticket-list b{font-size:.78rem;color:#765463;margin-right:2px}
 .reward-ticket-list span{font-size:.76rem;font-weight:850;padding:4px 7px;border-radius:8px;background:#fff0f6;border:1px solid #f3c7d9;color:var(--deep)}
+
+
+/* V4.2.2 管理員獎品區：依玩家 + 獎項分類 */
+.reward-person-summary{display:flex;gap:7px;flex-wrap:wrap}
+.reward-admin-categories{display:grid;gap:14px}
+.reward-category-group{border:1px solid #efd5df;border-radius:17px;overflow:hidden;background:#fffafb}
+.reward-category-head{display:grid;grid-template-columns:68px minmax(0,1fr) auto;align-items:center;gap:12px;padding:12px 14px;background:linear-gradient(135deg,#fff5f9,#fff)}
+.reward-category-head>img,.reward-category-placeholder{width:68px;height:68px;border-radius:13px;object-fit:cover;background:#fff;box-shadow:0 3px 10px #7d23481a}
+.reward-category-placeholder{display:grid;place-items:center;font-size:2rem}
+.reward-category-title{min-width:0}
+.reward-category-title h3{margin:2px 0 4px;font-size:1.02rem}
+.reward-category-title span{display:block;color:#765463;font-size:.82rem}
+.reward-category-rank{font-weight:950;color:var(--deep);font-size:.88rem}
+.reward-category-counts{display:flex;align-items:flex-end;justify-content:center;flex-direction:column;gap:6px}
+.reward-count-main{font-weight:950;color:var(--deep);background:#ffe7f0;border:1px solid #f4c9da;padding:6px 10px;border-radius:999px;white-space:nowrap}
+.reward-done-badge{background:#e8f7ec!important;color:#28703c!important}
+.reward-category-items{display:grid;border-top:1px solid #f0dde5}
+.reward-admin-entry{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:12px;padding:10px 14px;border-bottom:1px dashed #efd9e2;background:#fff}
+.reward-admin-entry:last-child{border-bottom:0}
+.reward-admin-entry.redeemed{background:#f8f8f8;opacity:.78}
+.reward-entry-meta{display:flex;align-items:center;gap:12px;min-width:0}
+.reward-entry-meta>div{display:grid;gap:2px}
+.reward-entry-meta b{font-size:.76rem;color:#765463}
+.reward-entry-meta span{font-size:.84rem;color:#5f3c49}
+.reward-entry-ticket{display:inline-grid;place-items:center;min-width:66px;padding:7px 8px!important;border-radius:10px;background:#fff0f6;color:var(--deep)!important;border:1px solid #f3c7d9;font-weight:950;white-space:nowrap}
+@media(max-width:640px){
+  .reward-category-head{grid-template-columns:56px minmax(0,1fr)}
+  .reward-category-head>img,.reward-category-placeholder{width:56px;height:56px}
+  .reward-category-counts{grid-column:1/-1;flex-direction:row;align-items:center;justify-content:flex-start;flex-wrap:wrap}
+  .reward-admin-entry{grid-template-columns:1fr}
+  .reward-admin-entry>.btn,.reward-admin-entry>.badge{width:100%}
+  .reward-entry-meta{align-items:flex-start}
+}

@@ -37,7 +37,92 @@ async function loadPlayers(){try{const users=await api('/admin/users');$('#playe
 async function deletePlayer(id,name,username){const ok=confirm(`確定永久刪除玩家「${name}」(@${username})？\n\n會一起清除：\n・玩家帳號與目前印章\n・所有抽獎紀錄\n・所有獎品兌換紀錄\n・所有印章異動紀錄\n\n如果這個玩家在目前這一彈抽過籤，該籤會恢復成可抽狀態，獎品數量也會補回。\n\n刪除後無法復原。`);if(!ok)return;try{const r=await api('/admin/users/'+id,{method:'DELETE'});toast(`已刪除 ${r.displayName||name}，清除 ${r.deletedDraws||0} 筆抽獎紀錄`);loadPlayers()}catch(e){toast(e.message)}}
 $('#cancelStamp').onclick=()=>$('#stampModal').classList.add('hidden');
 $('#stampForm').onsubmit=async e=>{e.preventDefault();const f=Object.fromEntries(new FormData(e.target));try{await api('/admin/users/'+f.userId+'/stamps',{method:'POST',body:JSON.stringify({amount:Number(f.amount),reason:f.reason})});$('#stampModal').classList.add('hidden');toast('印章已更新');loadPlayers()}catch(x){toast(x.message)}};
-async function loadRewards(){try{const rows=await api('/admin/rewards'),box=$('#rewardsBox');if(!rows.length){box.innerHTML='<div class="card card-body">目前沒有需要兌換的獎品。</div>';return}const groups=new Map();for(const r of rows){if(!groups.has(r.user_id))groups.set(r.user_id,{name:r.display_name,username:r.username,items:[]});groups.get(r.user_id).items.push(r)}box.innerHTML=[...groups.values()].map(g=>{const pending=g.items.filter(x=>!x.redeemed).length;return `<section class="reward-admin-group"><div class="reward-admin-head"><div><h2>${esc(g.name)}</h2><span class="small">@${esc(g.username)}</span></div><span class="badge">待兌換 ${pending} 件</span></div><div class="reward-admin-list">${g.items.map(x=>`<article class="reward-admin-item ${x.redeemed?'redeemed':''}">${x.image_url?`<img src="${esc(x.image_url)}" alt="${esc(x.name)}">`:'<div class="reward-placeholder">🎁</div>'}<div class="reward-admin-info"><b>${esc(x.rank)}・${esc(x.name)}</b><span>${esc(x.title)}・第 ${x.round_no} 彈${x.ticket_number?'・'+String(x.ticket_number).padStart(3,'0')+' 號':''}</span><span>抽中：${new Date(x.draw_created_at).toLocaleString('zh-TW')}</span>${x.redeemed?`<span class="redeemed-text">✓ 已兌換 ${x.redeemed_at?new Date(x.redeemed_at).toLocaleString('zh-TW'):''}</span>`:''}</div>${x.redeemed?'<span class="badge">已兌換</span>':`<button class="btn redeem-btn" data-id="${x.redemption_id}" data-name="${esc(x.rank+'・'+x.name)}" data-player="${esc(g.name)}">確認兌換</button>`}</article>`).join('')}</div></section>`}).join('');$$('.redeem-btn').forEach(b=>b.onclick=async()=>{if(!confirm(`確定已將「${b.dataset.name}」交給 ${b.dataset.player}？
+async function loadRewards(){try{
+  const rows=await api('/admin/rewards'),box=$('#rewardsBox');
+  if(!rows.length){box.innerHTML='<div class="card card-body">目前沒有需要兌換的獎品。</div>';return}
 
-確認後會記錄兌換時間。`))return;try{await api('/admin/rewards/'+b.dataset.id+'/redeem',{method:'POST'});toast('已標記為兌換完成');loadRewards()}catch(e){toast(e.message)}})}catch(e){toast(e.message)}}
+  const people=new Map();
+  for(const r of rows){
+    if(!people.has(r.user_id))people.set(r.user_id,{name:r.display_name,username:r.username,items:[]});
+    people.get(r.user_id).items.push(r)
+  }
+
+  const categoryKey=r=>[r.lottery_id||r.title,r.round_no,r.rank,r.name].join('||');
+  const sortDateDesc=(a,b)=>new Date(b.draw_created_at)-new Date(a.draw_created_at);
+
+  box.innerHTML=[...people.values()].map(g=>{
+    const pendingTotal=g.items.filter(x=>!x.redeemed).length;
+    const categories=new Map();
+
+    for(const item of g.items){
+      const k=categoryKey(item);
+      if(!categories.has(k))categories.set(k,{sample:item,items:[]});
+      categories.get(k).items.push(item)
+    }
+
+    const categoryHtml=[...categories.values()]
+      .sort((a,b)=>{
+        const ap=a.items.filter(x=>!x.redeemed).length,bp=b.items.filter(x=>!x.redeemed).length;
+        return bp-ap || b.items.length-a.items.length || sortDateDesc(a.sample,b.sample)
+      })
+      .map(cat=>{
+        const s=cat.sample;
+        const items=[...cat.items].sort((a,b)=>{
+          if(a.redeemed!==b.redeemed)return a.redeemed?1:-1;
+          return sortDateDesc(a,b)
+        });
+        const pending=items.filter(x=>!x.redeemed).length;
+        const redeemed=items.length-pending;
+
+        return `<section class="reward-category-group">
+          <div class="reward-category-head">
+            ${s.image_url?`<img src="${esc(s.image_url)}" alt="${esc(s.name)}">`:'<div class="reward-category-placeholder">🎁</div>'}
+            <div class="reward-category-title">
+              <div class="reward-category-rank">${esc(s.rank)}</div>
+              <h3>${esc(s.name)}</h3>
+              <span>${esc(s.title)}・第 ${s.round_no} 彈</span>
+            </div>
+            <div class="reward-category-counts">
+              <span class="reward-count-main">共 ${items.length} 件</span>
+              ${pending?`<span class="badge">待兌換 ${pending}</span>`:''}
+              ${redeemed?`<span class="badge reward-done-badge">已兌換 ${redeemed}</span>`:''}
+            </div>
+          </div>
+
+          <div class="reward-category-items">
+            ${items.map(x=>`<article class="reward-admin-entry ${x.redeemed?'redeemed':''}">
+              <div class="reward-entry-meta">
+                <span class="reward-entry-ticket">${x.ticket_number?String(x.ticket_number).padStart(3,'0')+' 號':'無票號'}</span>
+                <div>
+                  <b>抽中日期</b>
+                  <span>${new Date(x.draw_created_at).toLocaleString('zh-TW')}</span>
+                  ${x.redeemed&&x.redeemed_at?`<span class="redeemed-text">兌換日期：${new Date(x.redeemed_at).toLocaleString('zh-TW')}</span>`:''}
+                </div>
+              </div>
+              ${x.redeemed
+                ?'<span class="badge reward-done-badge">✓ 已兌換</span>'
+                :`<button class="btn redeem-btn" data-id="${x.redemption_id}" data-name="${esc(x.rank+'・'+x.name)}" data-player="${esc(g.name)}">確認兌換</button>`}
+            </article>`).join('')}
+          </div>
+        </section>`
+      }).join('');
+
+    return `<section class="reward-admin-group">
+      <div class="reward-admin-head">
+        <div><h2>${esc(g.name)}</h2><span class="small">@${esc(g.username)}</span></div>
+        <div class="reward-person-summary"><span class="badge">獎品 ${g.items.length} 件</span><span class="badge">待兌換 ${pendingTotal} 件</span></div>
+      </div>
+      <div class="reward-admin-categories">${categoryHtml}</div>
+    </section>`
+  }).join('');
+
+  $$('.redeem-btn').forEach(b=>b.onclick=async()=>{
+    if(!confirm(`確定已將「${b.dataset.name}」交給 ${b.dataset.player}？\n\n確認後會記錄兌換時間。`))return;
+    try{
+      await api('/admin/rewards/'+b.dataset.id+'/redeem',{method:'POST'});
+      toast('已標記為兌換完成');
+      loadRewards()
+    }catch(e){toast(e.message)}
+  })
+}catch(e){toast(e.message)}}
 async function loadLogs(){try{const d=await api('/admin/logs');$('#logsBox').innerHTML=`<h2>抽獎紀錄</h2><div class="table-wrap"><table><thead><tr><th>時間</th><th>玩家</th><th>一番賞</th><th>號碼</th><th>結果</th><th>彈數</th></tr></thead><tbody>${d.draws.map(x=>`<tr><td>${new Date(x.created_at).toLocaleString('zh-TW')}</td><td>${esc(x.display_name)}</td><td>${esc(x.title)}</td><td>${x.ticket_number?String(x.ticket_number).padStart(3,'0'):'-'}</td><td>${esc(x.rank)}・${esc(x.name)}</td><td>${x.round_no}</td></tr>`).join('')}</tbody></table></div><h2>印章紀錄</h2><div class="table-wrap"><table><thead><tr><th>時間</th><th>玩家</th><th>異動</th><th>原因</th></tr></thead><tbody>${d.stamps.map(x=>`<tr><td>${new Date(x.created_at).toLocaleString('zh-TW')}</td><td>${esc(x.display_name)}</td><td>${x.amount>0?'+':''}${x.amount}</td><td>${esc(x.reason)}</td></tr>`).join('')}</tbody></table></div>`}catch(e){toast(e.message)}}
