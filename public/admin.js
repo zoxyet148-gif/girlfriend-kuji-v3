@@ -29,7 +29,14 @@ $('#cancelLottery').onclick=closeLotteryModal;$('#cancelLotteryTop').onclick=clo
 async function editLottery(id){try{const d=await api('/lotteries/'+id),f=$('#lotteryForm');f.reset();f.id.value=d.id;f.title.value=d.title;f.description.value=d.description||'';f.bannerUrl.value=d.banner_url||'';f.stampCost.value=d.stamp_cost;f.status.value=d.status;if(d.banner_url){$('#bannerPreview').src=d.banner_url;$('#bannerPreview').classList.remove('hidden')}else $('#bannerPreview').classList.add('hidden');$('#prizeEditor').innerHTML='';d.prizes.forEach((p,i)=>addPrizeRow({rank:p.rank,name:p.name,quantity:p.initial_quantity,imageUrl:p.image_url,isLosing:p.is_losing,effect:p.effect||'none'},i===0));$('#lotteryModalTitle').textContent='編輯一番賞';$('#lotteryModal').classList.remove('hidden')}catch(e){toast(e.message)}}
 $('#bannerFile').onchange=async e=>{if(!e.target.files[0])return;try{toast('圖片上傳中…');const url=await upload(e.target.files[0]);$('#lotteryForm [name=bannerUrl]').value=url;$('#bannerPreview').src=url;$('#bannerPreview').classList.remove('hidden');toast('上傳完成')}catch(x){toast(x.message)}};
 $('#lotteryForm').onsubmit=async e=>{e.preventDefault();const save=$('#saveLotteryBtn');save.disabled=true;try{const prizes=[];for(const row of $$('.prize-row')){let imageUrl=row.querySelector('.p-url').value;const file=row.querySelector('.p-file').files[0];if(file){toast('獎品圖片上傳中…');imageUrl=await upload(file)}prizes.push({rank:row.querySelector('.p-rank').value.trim(),name:row.querySelector('.p-name').value.trim(),quantity:Number(row.querySelector('.p-qty').value),imageUrl,isLosing:row.querySelector('.p-lose').checked,effect:row.querySelector('.p-effect').value})}const f=new FormData(e.target),body={title:f.get('title'),description:f.get('description'),bannerUrl:f.get('bannerUrl'),stampCost:Number(f.get('stampCost')),status:f.get('status'),prizes},id=f.get('id');await api(id?'/admin/lotteries/'+id:'/admin/lotteries',{method:id?'PUT':'POST',body:JSON.stringify(body)});closeLotteryModal();toast('已儲存並完成號碼洗牌');loadLotteries()}catch(x){toast(x.message)}finally{save.disabled=false;updateTotal()}};
-async function showTickets(id,title){try{const rows=await api('/admin/lotteries/'+id+'/tickets'),w=window.open('','_blank');w.document.write(`<meta charset="utf-8"><title>${esc(title)} 籤位</title><style>body{font-family:sans-serif;padding:24px}.g{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}.c{border:1px solid #ddd;border-radius:12px;padding:12px}.d{opacity:.5;background:#eee}</style><h1>${esc(title)}｜本彈籤位</h1><div class="g">${rows.map(x=>`<div class="c ${x.is_drawn?'d':''}"><b>${String(x.ticket_number).padStart(3,'0')} 號</b><br>${esc(x.rank)}・${esc(x.name)}<br><small>${x.is_drawn?'已由 '+esc(x.display_name||'玩家')+' 抽出':'尚未抽出'}</small></div>`).join('')}</div>`)}catch(e){toast(e.message)}}
+async function showTickets(id,title){try{
+  const rows=await api('/admin/lotteries/'+id+'/tickets'),w=window.open('','_blank');
+  const cards=rows.map(x=>{
+    const search=[String(x.ticket_number).padStart(3,'0'),x.ticket_number,x.rank,x.name,x.is_drawn?'已抽':'未抽',x.display_name||''].join(' ').toLowerCase();
+    return `<div class="c ${x.is_drawn?'d':''}" data-search="${esc(search)}"><b>${String(x.ticket_number).padStart(3,'0')} 號</b><br>${esc(x.rank)}・${esc(x.name)}<br><small>${x.is_drawn?'已由 '+esc(x.display_name||'玩家')+' 抽出':'尚未抽出'}</small></div>`
+  }).join('');
+  w.document.write(`<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)} 籤位</title><style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:20px;margin:0;color:#402a33}.bar{position:sticky;top:0;background:#fff;padding:12px 0 14px;z-index:2}.search{width:100%;box-sizing:border-box;border:1px solid #e6cbd5;border-radius:14px;padding:12px 14px;font-size:16px}.count{font-size:13px;color:#765463;margin-top:7px}.g{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}.c{border:1px solid #ead8df;border-radius:12px;padding:12px;background:#fff8fb}.d{opacity:.55;background:#eee}.hide{display:none}.empty{padding:25px;text-align:center;color:#765463;display:none}</style><h1>${esc(title)}｜本彈籤位</h1><div class="bar"><input id="q" class="search" type="search" placeholder="搜尋票號、獎項、玩家或狀態"><div id="count" class="count">共 ${rows.length} 張</div></div><div id="g" class="g">${cards}</div><div id="empty" class="empty">找不到符合的籤位。</div><script>const q=document.getElementById('q'),cards=[...document.querySelectorAll('.c')],count=document.getElementById('count'),empty=document.getElementById('empty');q.oninput=()=>{const s=q.value.trim().toLowerCase();let n=0;cards.forEach(c=>{const ok=!s||c.dataset.search.includes(s);c.classList.toggle('hide',!ok);if(ok)n++});count.textContent='顯示 '+n+'/${rows.length} 張';empty.style.display=n?'none':'block'}<\/script>`)
+}catch(e){toast(e.message)}}
 async function resetLottery(id){const t=prompt('會保留所有舊紀錄並開始新一彈，請輸入 RESET：');if(t!=='RESET')return;try{await api('/admin/lotteries/'+id+'/reset',{method:'POST',body:JSON.stringify({confirm:'RESET'})});toast('已開始下一彈並重新洗牌');loadLotteries()}catch(e){toast(e.message)}}
 async function deleteLottery(id){const l=lotteries.find(x=>String(x.id)===String(id));const title=l?.title||'這個一番賞';const ok=confirm(`確定永久刪除「${title}」？\n\n此操作會一起刪除：\n・所有籤位\n・所有獎項\n・所有抽獎紀錄\n\n玩家帳號與目前印章不會改變，刪除後無法復原。`);if(!ok)return;try{const r=await api('/admin/lotteries/'+id,{method:'DELETE'});toast(`已刪除「${r.title||title}」，並清除 ${r.deletedDraws||0} 筆抽獎紀錄`);loadLotteries()}catch(e){toast(e.message)}}
 $('#backupBtn').onclick=async()=>{try{const r=await fetch(API+'/admin/backup',{headers:{Authorization:`Bearer ${token}`}});if(!r.ok)throw new Error((await r.json()).error);const blob=await r.blob(),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`girlfriend-kuji-backup-${new Date().toISOString().slice(0,10)}.json`;a.click();URL.revokeObjectURL(a.href);toast('備份已下載')}catch(e){toast(e.message)}};
@@ -43,78 +50,114 @@ async function loadRewards(){try{
 
   const people=new Map();
   for(const r of rows){
-    if(!people.has(r.user_id))people.set(r.user_id,{name:r.display_name,username:r.username,items:[]});
+    if(!people.has(r.user_id))people.set(r.user_id,{id:r.user_id,name:r.display_name,username:r.username,items:[]});
     people.get(r.user_id).items.push(r)
   }
 
-  const categoryKey=r=>[r.lottery_id||r.title,r.round_no,r.rank,r.name].join('||');
-  const sortDateDesc=(a,b)=>new Date(b.draw_created_at)-new Date(a.draw_created_at);
+  const rankOrder=s=>{
+    const m=String(s||'').toUpperCase().match(/^([A-Z])/);
+    return m?m[1].charCodeAt(0):999
+  };
+  const dateText=d=>new Date(d).toLocaleString('zh-TW');
 
-  box.innerHTML=[...people.values()].map(g=>{
-    const pendingTotal=g.items.filter(x=>!x.redeemed).length;
-    const categories=new Map();
-
-    for(const item of g.items){
-      const k=categoryKey(item);
-      if(!categories.has(k))categories.set(k,{sample:item,items:[]});
-      categories.get(k).items.push(item)
+  const personHtml=[...people.values()].map(person=>{
+    const pendingTotal=person.items.filter(x=>!x.redeemed).length;
+    const ranks=new Map();
+    for(const item of person.items){
+      const rk=item.rank||'其他獎項';
+      if(!ranks.has(rk))ranks.set(rk,[]);
+      ranks.get(rk).push(item)
     }
 
-    const categoryHtml=[...categories.values()]
-      .sort((a,b)=>{
-        const ap=a.items.filter(x=>!x.redeemed).length,bp=b.items.filter(x=>!x.redeemed).length;
-        return bp-ap || b.items.length-a.items.length || sortDateDesc(a.sample,b.sample)
-      })
-      .map(cat=>{
-        const s=cat.sample;
-        const items=[...cat.items].sort((a,b)=>{
+    const rankHtml=[...ranks.entries()].sort((a,b)=>rankOrder(a[0])-rankOrder(b[0])||a[0].localeCompare(b[0],'zh-Hant')).map(([rank,rankItems])=>{
+      const prizes=new Map();
+      for(const item of rankItems){
+        const k=[item.lottery_id||item.title,item.round_no,item.name].join('||');
+        if(!prizes.has(k))prizes.set(k,{sample:item,items:[]});
+        prizes.get(k).items.push(item)
+      }
+
+      const prizeHtml=[...prizes.values()].map(group=>{
+        const s=group.sample;
+        const items=[...group.items].sort((a,b)=>{
           if(a.redeemed!==b.redeemed)return a.redeemed?1:-1;
-          return sortDateDesc(a,b)
+          return new Date(b.draw_created_at)-new Date(a.draw_created_at)
         });
         const pending=items.filter(x=>!x.redeemed).length;
         const redeemed=items.length-pending;
 
-        return `<section class="reward-category-group">
-          <div class="reward-category-head">
+        return `<section class="admin-prize-subgroup">
+          <div class="admin-prize-subhead">
             ${s.image_url?`<img src="${esc(s.image_url)}" alt="${esc(s.name)}">`:'<div class="reward-category-placeholder">🎁</div>'}
-            <div class="reward-category-title">
-              <div class="reward-category-rank">${esc(s.rank)}</div>
-              <h3>${esc(s.name)}</h3>
-              <span>${esc(s.title)}・第 ${s.round_no} 彈</span>
-            </div>
-            <div class="reward-category-counts">
-              <span class="reward-count-main">共 ${items.length} 件</span>
-              ${pending?`<span class="badge">待兌換 ${pending}</span>`:''}
-              ${redeemed?`<span class="badge reward-done-badge">已兌換 ${redeemed}</span>`:''}
-            </div>
+            <div><h4>${esc(s.name)}</h4><span>${esc(s.title)}・第 ${s.round_no} 彈</span></div>
+            <div class="reward-category-counts"><span class="reward-count-main">共 ${items.length} 件</span>${pending?`<span class="badge">待兌換 ${pending}</span>`:''}${redeemed?`<span class="badge reward-done-badge">已兌換 ${redeemed}</span>`:''}</div>
           </div>
-
           <div class="reward-category-items">
-            ${items.map(x=>`<article class="reward-admin-entry ${x.redeemed?'redeemed':''}">
+          ${items.map(x=>{
+            const search=[person.name,person.username,x.rank,x.name,x.title,`第${x.round_no}彈`,x.ticket_number?String(x.ticket_number).padStart(3,'0'):'',x.redeemed?'已兌換':'待兌換',dateText(x.draw_created_at),x.redeemed_at?dateText(x.redeemed_at):''].join(' ').toLowerCase();
+            return `<article class="reward-admin-entry admin-reward-search-item ${x.redeemed?'redeemed':''}" data-search="${esc(search)}">
               <div class="reward-entry-meta">
                 <span class="reward-entry-ticket">${x.ticket_number?String(x.ticket_number).padStart(3,'0')+' 號':'無票號'}</span>
-                <div>
-                  <b>抽中日期</b>
-                  <span>${new Date(x.draw_created_at).toLocaleString('zh-TW')}</span>
-                  ${x.redeemed&&x.redeemed_at?`<span class="redeemed-text">兌換日期：${new Date(x.redeemed_at).toLocaleString('zh-TW')}</span>`:''}
-                </div>
+                <div><b>抽中日期</b><span>${dateText(x.draw_created_at)}</span>${x.redeemed&&x.redeemed_at?`<span class="redeemed-text">兌換日期：${dateText(x.redeemed_at)}</span>`:''}</div>
               </div>
-              ${x.redeemed
-                ?'<span class="badge reward-done-badge">✓ 已兌換</span>'
-                :`<button class="btn redeem-btn" data-id="${x.redemption_id}" data-name="${esc(x.rank+'・'+x.name)}" data-player="${esc(g.name)}">確認兌換</button>`}
-            </article>`).join('')}
+              ${x.redeemed?'<span class="badge reward-done-badge">✓ 已兌換</span>':`<button class="btn redeem-btn" data-id="${x.redemption_id}" data-name="${esc(x.rank+'・'+x.name)}" data-player="${esc(person.name)}">確認兌換</button>`}
+            </article>`
+          }).join('')}
           </div>
         </section>`
       }).join('');
 
-    return `<section class="reward-admin-group">
-      <div class="reward-admin-head">
-        <div><h2>${esc(g.name)}</h2><span class="small">@${esc(g.username)}</span></div>
-        <div class="reward-person-summary"><span class="badge">獎品 ${g.items.length} 件</span><span class="badge">待兌換 ${pendingTotal} 件</span></div>
-      </div>
-      <div class="reward-admin-categories">${categoryHtml}</div>
+      return `<details class="admin-rank-group" open>
+        <summary><span class="admin-rank-name">🎁 ${esc(rank)}</span><span class="badge">${rankItems.length} 件</span></summary>
+        <div class="admin-rank-body">${prizeHtml}</div>
+      </details>`
+    }).join('');
+
+    return `<section class="reward-admin-group admin-person-group">
+      <div class="reward-admin-head"><div><h2>👤 ${esc(person.name)}</h2><span class="small">@${esc(person.username)}</span></div><div class="reward-person-summary"><span class="badge">獎品 ${person.items.length} 件</span><span class="badge">待兌換 ${pendingTotal} 件</span></div></div>
+      <div class="admin-person-body">${rankHtml}</div>
     </section>`
   }).join('');
+
+  box.innerHTML=`<div class="admin-reward-searchbar search-toolbar">
+    <label class="search-box">🔎<input id="adminRewardSearch" type="search" placeholder="搜尋玩家、獎項、獎品、票號或日期"></label>
+    <select id="adminRewardStatus" class="search-select"><option value="">全部狀態</option><option value="待兌換">待兌換</option><option value="已兌換">已兌換</option></select>
+    <span id="adminRewardSearchCount" class="small">共 ${rows.length} 件</span>
+  </div>${personHtml}<div id="adminRewardSearchEmpty" class="search-empty hidden">找不到符合的兌換獎品。</div>`;
+
+  const filterRewards=()=>{
+    const q=$('#adminRewardSearch').value.trim().toLowerCase();
+    const status=$('#adminRewardStatus').value;
+    let visible=0;
+
+    $$('.admin-reward-search-item').forEach(item=>{
+      const okQ=!q||item.dataset.search.includes(q);
+      const okS=!status||item.dataset.search.includes(status);
+      const ok=okQ&&okS;
+      item.classList.toggle('search-hidden',!ok);
+      if(ok)visible++
+    });
+
+    $$('.admin-prize-subgroup').forEach(g=>{
+      const any=[...g.querySelectorAll('.admin-reward-search-item')].some(x=>!x.classList.contains('search-hidden'));
+      g.classList.toggle('search-hidden',!any)
+    });
+    $$('.admin-rank-group').forEach(g=>{
+      const any=[...g.querySelectorAll('.admin-prize-subgroup')].some(x=>!x.classList.contains('search-hidden'));
+      g.classList.toggle('search-hidden',!any);
+      if((q||status)&&any)g.open=true
+    });
+    $$('.admin-person-group').forEach(g=>{
+      const any=[...g.querySelectorAll('.admin-rank-group')].some(x=>!x.classList.contains('search-hidden'));
+      g.classList.toggle('search-hidden',!any)
+    });
+
+    $('#adminRewardSearchCount').textContent=`找到 ${visible}/${rows.length} 件`;
+    $('#adminRewardSearchEmpty').classList.toggle('hidden',visible!==0)
+  };
+
+  $('#adminRewardSearch').oninput=filterRewards;
+  $('#adminRewardStatus').onchange=filterRewards;
 
   $$('.redeem-btn').forEach(b=>b.onclick=async()=>{
     if(!confirm(`確定已將「${b.dataset.name}」交給 ${b.dataset.player}？\n\n確認後會記錄兌換時間。`))return;
