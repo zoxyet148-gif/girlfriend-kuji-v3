@@ -81,3 +81,35 @@
   .reward-admin-entry>.btn,.reward-admin-entry>.badge{width:100%}
   .reward-entry-meta{align-items:flex-start}
 }
+
+
+/* V4.2.3 搜尋 + 管理員獎品三級分類 */
+.search-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:10px 0 16px}
+.search-box{flex:1;min-width:220px;display:flex;align-items:center;gap:8px;background:#fff;border:1px solid var(--line);border-radius:14px;padding:0 12px;box-shadow:0 3px 12px #7d23480b}
+.search-box input{width:100%;border:0;outline:0;background:transparent;padding:12px 2px;font:inherit;color:inherit}
+.search-select{border:1px solid var(--line);border-radius:12px;background:#fff;padding:11px 12px;font:inherit;color:inherit}
+.search-empty{padding:18px;border:1px dashed var(--line);border-radius:14px;background:#fff;text-align:center;color:#765463;margin:10px 0}
+.search-hidden{display:none!important}
+.ticket-search-toolbar{margin-top:-4px}
+.admin-reward-searchbar{position:sticky;top:8px;z-index:5;background:#fff9fcf2;backdrop-filter:blur(10px);padding:10px;border:1px solid #f0d9e3;border-radius:16px;margin-bottom:16px}
+.admin-rank-group{border:1px solid #edd4df;border-radius:16px;background:#fff;overflow:hidden;margin:0 0 12px}
+.admin-rank-group>summary{cursor:pointer;list-style:none;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:13px 15px;background:linear-gradient(135deg,#ffeaf3,#fff);font-weight:950}
+.admin-rank-group>summary::-webkit-details-marker{display:none}
+.admin-rank-group>summary::after{content:"⌄";font-size:1.15rem;color:#a74b70;margin-left:auto}
+.admin-rank-group:not([open])>summary::after{content:"›"}
+.admin-rank-name{font-size:1.05rem;color:var(--deep)}
+.admin-rank-body{padding:10px;display:grid;gap:10px}
+.admin-prize-subgroup{border:1px solid #f0dce4;border-radius:14px;overflow:hidden;background:#fffafb}
+.admin-prize-subhead{display:grid;grid-template-columns:58px minmax(0,1fr) auto;align-items:center;gap:10px;padding:10px 12px;background:#fff}
+.admin-prize-subhead>img,.admin-prize-subhead>.reward-category-placeholder{width:58px;height:58px;object-fit:cover;border-radius:11px;background:#fff3f8}
+.admin-prize-subhead h4{margin:0 0 3px;font-size:1rem}
+.admin-prize-subhead span{font-size:.8rem;color:#765463}
+.admin-person-body{display:grid;gap:4px}
+@media(max-width:640px){
+  .search-box{min-width:100%}
+  .search-select{flex:1}
+  .admin-reward-searchbar{top:4px}
+  .admin-prize-subhead{grid-template-columns:50px minmax(0,1fr)}
+  .admin-prize-subhead>img,.admin-prize-subhead>.reward-category-placeholder{width:50px;height:50px}
+  .admin-prize-subhead .reward-category-counts{grid-column:1/-1;flex-direction:row;justify-content:flex-start;align-items:center;flex-wrap:wrap}
+}

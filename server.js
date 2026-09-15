@@ -13,7 +13,8 @@ const asyncRoute=fn=>(req,res,next)=>Promise.resolve(fn(req,res,next)).catch(nex
 const signToken=u=>jwt.sign({id:u.id,role:u.role,username:u.username},JWT_SECRET,{expiresIn:'30d'});
 function auth(role){return asyncRoute(async(req,res,next)=>{const h=req.headers.authorization||'',t=h.startsWith('Bearer ')?h.slice(7):'';if(!t)return res.status(401).json({error:'未登入'});try{req.user=jwt.verify(t,JWT_SECRET);if(role&&req.user.role!==role)return res.status(403).json({error:'權限不足'});next()}catch{return res.status(401).json({error:'登入已失效，請重新登入'})}})}
 function optionalAuth(req,res,next){const h=req.headers.authorization||'',t=h.startsWith('Bearer ')?h.slice(7):'';if(!t)return next();try{req.user=jwt.verify(t,JWT_SECRET)}catch{}next()}
-async function initDb(){await pool.query(`
+async function initDb(){
+await pool.query(`
 SET search_path TO public;
 CREATE TABLE IF NOT EXISTS public.users(id SERIAL PRIMARY KEY,username VARCHAR(50) UNIQUE NOT NULL,password_hash TEXT NOT NULL,display_name VARCHAR(80) NOT NULL,role VARCHAR(20) NOT NULL DEFAULT 'player',stamps INTEGER NOT NULL DEFAULT 0 CHECK(stamps>=0),avatar_url TEXT,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
 CREATE TABLE IF NOT EXISTS public.lotteries(id SERIAL PRIMARY KEY,title VARCHAR(120) NOT NULL,description TEXT NOT NULL DEFAULT '',banner_url TEXT,stamp_cost INTEGER NOT NULL DEFAULT 1 CHECK(stamp_cost>0),status VARCHAR(20) NOT NULL DEFAULT 'draft',round_no INTEGER NOT NULL DEFAULT 1,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
@@ -24,13 +25,84 @@ CREATE TABLE IF NOT EXISTS public.draws(id BIGSERIAL PRIMARY KEY,user_id INTEGER
 ALTER TABLE public.draws ADD COLUMN IF NOT EXISTS ticket_number INTEGER;
 CREATE TABLE IF NOT EXISTS public.lottery_tickets(id BIGSERIAL PRIMARY KEY,lottery_id INTEGER NOT NULL REFERENCES public.lotteries(id) ON DELETE CASCADE,round_no INTEGER NOT NULL,ticket_number INTEGER NOT NULL,prize_id INTEGER NOT NULL REFERENCES public.prizes(id) ON DELETE CASCADE,is_drawn BOOLEAN NOT NULL DEFAULT FALSE,drawn_by INTEGER REFERENCES public.users(id),drawn_at TIMESTAMPTZ,UNIQUE(lottery_id,round_no,ticket_number));
 CREATE TABLE IF NOT EXISTS public.stamp_logs(id BIGSERIAL PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES public.users(id),admin_id INTEGER REFERENCES public.users(id),amount INTEGER NOT NULL,reason TEXT NOT NULL DEFAULT '',created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
-CREATE TABLE IF NOT EXISTS public.prize_redemptions(id BIGSERIAL PRIMARY KEY,draw_id BIGINT UNIQUE NOT NULL REFERENCES public.draws(id) ON DELETE CASCADE,user_id INTEGER NOT NULL REFERENCES public.users(id),redeemed BOOLEAN NOT NULL DEFAULT FALSE,redeemed_at TIMESTAMPTZ,redeemed_by INTEGER REFERENCES public.users(id),created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
-CREATE INDEX IF NOT EXISTS idx_tickets_round ON public.lottery_tickets(lottery_id,round_no,ticket_number);CREATE INDEX IF NOT EXISTS idx_draws_user ON public.draws(user_id,created_at DESC);CREATE INDEX IF NOT EXISTS idx_redemptions_user ON public.prize_redemptions(user_id,redeemed,created_at DESC);
-INSERT INTO public.prize_redemptions(draw_id,user_id) SELECT d.id,d.user_id FROM public.draws d JOIN public.prizes p ON p.id=d.prize_id WHERE NOT p.is_losing ON CONFLICT(draw_id) DO NOTHING;`);
-const au=process.env.ADMIN_USERNAME,ap=process.env.ADMIN_PASSWORD;if(au&&ap){const hash=await bcrypt.hash(ap,12);const f=await pool.query('SELECT id,role FROM public.users WHERE username=$1',[au]);if(!f.rowCount){await pool.query("INSERT INTO public.users(username,password_hash,display_name,role,stamps) VALUES($1,$2,'管理員','admin',0)",[au,hash]);console.log('管理員帳號已建立')}else{await pool.query("UPDATE public.users SET password_hash=$1,role='admin' WHERE username=$2",[hash,au]);console.log('管理員帳號已同步')}}}
+CREATE TABLE IF NOT EXISTS public.prize_redemptions(id BIGSERIAL PRIMARY KEY,draw_id BIGINT UNIQUE REFERENCES public.draws(id) ON DELETE SET NULL,user_id INTEGER NOT NULL REFERENCES public.users(id),redeemed BOOLEAN NOT NULL DEFAULT FALSE,redeemed_at TIMESTAMPTZ,redeemed_by INTEGER REFERENCES public.users(id),created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+`);
+
+const rewardColumns=[
+  ['lottery_title','TEXT'],
+  ['round_no','INTEGER'],
+  ['ticket_number','INTEGER'],
+  ['prize_rank','VARCHAR(50)'],
+  ['prize_name','VARCHAR(200)'],
+  ['prize_image_url','TEXT'],
+  ['draw_created_at','TIMESTAMPTZ']
+];
+for(const [name,type] of rewardColumns){
+  await pool.query(`ALTER TABLE public.prize_redemptions ADD COLUMN IF NOT EXISTS ${name} ${type}`);
+}
+
+// Make draw_id optional and keep the reward snapshot if its original draw is deleted.
+await pool.query('ALTER TABLE public.prize_redemptions ALTER COLUMN draw_id DROP NOT NULL');
+const fk=(await pool.query(`
+  SELECT c.conname
+  FROM pg_constraint c
+  JOIN pg_class t ON t.oid=c.conrelid
+  JOIN pg_namespace n ON n.oid=t.relnamespace
+  WHERE n.nspname='public' AND t.relname='prize_redemptions'
+    AND c.contype='f'
+    AND pg_get_constraintdef(c.oid) ILIKE 'FOREIGN KEY (draw_id)%'
+`)).rows;
+for(const x of fk)await pool.query(`ALTER TABLE public.prize_redemptions DROP CONSTRAINT IF EXISTS "${String(x.conname).replace(/"/g,'""')}"`);
+await pool.query(`ALTER TABLE public.prize_redemptions ADD CONSTRAINT prize_redemptions_draw_id_fkey FOREIGN KEY(draw_id) REFERENCES public.draws(id) ON DELETE SET NULL`);
+
+await pool.query('CREATE INDEX IF NOT EXISTS idx_tickets_round ON public.lottery_tickets(lottery_id,round_no,ticket_number)');
+await pool.query('CREATE INDEX IF NOT EXISTS idx_draws_user ON public.draws(user_id,created_at DESC)');
+await pool.query('CREATE INDEX IF NOT EXISTS idx_redemptions_user ON public.prize_redemptions(user_id,redeemed,created_at DESC)');
+
+// Create missing reward rows from still-existing winning draws.
+await pool.query(`
+INSERT INTO public.prize_redemptions(draw_id,user_id,lottery_title,round_no,ticket_number,prize_rank,prize_name,prize_image_url,draw_created_at)
+SELECT d.id,d.user_id,l.title,d.round_no,d.ticket_number,p.rank,p.name,p.image_url,d.created_at
+FROM public.draws d
+JOIN public.prizes p ON p.id=d.prize_id
+JOIN public.lotteries l ON l.id=d.lottery_id
+WHERE NOT p.is_losing
+ON CONFLICT(draw_id) DO NOTHING
+`);
+
+// Fill snapshot fields for all older reward rows whose source draw still exists.
+await pool.query(`
+UPDATE public.prize_redemptions r SET
+  lottery_title=COALESCE(r.lottery_title,l.title),
+  round_no=COALESCE(r.round_no,d.round_no),
+  ticket_number=COALESCE(r.ticket_number,d.ticket_number),
+  prize_rank=COALESCE(r.prize_rank,p.rank),
+  prize_name=COALESCE(r.prize_name,p.name),
+  prize_image_url=COALESCE(r.prize_image_url,p.image_url),
+  draw_created_at=COALESCE(r.draw_created_at,d.created_at)
+FROM public.draws d
+JOIN public.prizes p ON p.id=d.prize_id
+JOIN public.lotteries l ON l.id=d.lottery_id
+WHERE r.draw_id=d.id
+`);
+
+const au=process.env.ADMIN_USERNAME,ap=process.env.ADMIN_PASSWORD;
+if(au&&ap){
+  const hash=await bcrypt.hash(ap,12);
+  const f=await pool.query('SELECT id,role FROM public.users WHERE username=$1',[au]);
+  if(!f.rowCount){
+    await pool.query("INSERT INTO users(username,password_hash,display_name,role,stamps) VALUES($1,$2,'管理員','admin',0)",[au,hash]);
+    console.log('管理員帳號已建立')
+  }else{
+    await pool.query("UPDATE users SET password_hash=$1,role='admin' WHERE username=$2",[hash,au]);
+    console.log('管理員帳號已同步')
+  }
+}
+console.log('獎品快照資料表已檢查並完成遷移');
+}
 async function uploadImage(file){if(!file)return null;if(!process.env.CLOUDINARY_CLOUD_NAME)throw new Error('尚未設定 Cloudinary');if(!file.mimetype.startsWith('image/'))throw new Error('只能上傳圖片');return new Promise((resolve,reject)=>{const s=cloudinary.uploader.upload_stream({folder:'girlfriend-kuji',resource_type:'image',transformation:[{quality:'auto',fetch_format:'auto'}]},(e,r)=>e?reject(e):resolve(r.secure_url));s.end(file.buffer)})}
 async function generateTickets(client,lotteryId,roundNo){await client.query('DELETE FROM lottery_tickets WHERE lottery_id=$1 AND round_no=$2',[lotteryId,roundNo]);const ps=(await client.query('SELECT id,initial_quantity FROM prizes WHERE lottery_id=$1 AND active=TRUE ORDER BY sort_order,id',[lotteryId])).rows;const bag=[];for(const p of ps)for(let i=0;i<p.initial_quantity;i++)bag.push(p.id);for(let i=bag.length-1;i>0;i--){const j=crypto.randomInt(i+1);[bag[i],bag[j]]=[bag[j],bag[i]]}for(let i=0;i<bag.length;i++)await client.query('INSERT INTO lottery_tickets(lottery_id,round_no,ticket_number,prize_id) VALUES($1,$2,$3,$4)',[lotteryId,roundNo,i+1,bag[i]]);return bag.length}
-app.get('/api/health',(req,res)=>res.json({ok:true,version:'4.2.5-independent-reward-history'}));
+app.get('/api/health',(req,res)=>res.json({ok:true,version:'4.2.6-safe-reward-migration'}));
 app.post('/api/auth/register',asyncRoute(async(req,res)=>{if(String(process.env.ALLOW_REGISTRATION||'true').toLowerCase()!=='true')return res.status(403).json({error:'目前未開放註冊'});const username=String(req.body.username||'').trim(),password=String(req.body.password||''),displayName=String(req.body.displayName||username).trim();if(!/^[A-Za-z0-9_]{3,30}$/.test(username))return res.status(400).json({error:'帳號需為 3～30 位英數字或底線'});if(password.length<6)return res.status(400).json({error:'密碼至少 6 位'});const hash=await bcrypt.hash(password,12);try{const r=await pool.query("INSERT INTO users(username,password_hash,display_name,role) VALUES($1,$2,$3,'player') RETURNING id,username,display_name,role,stamps",[username,hash,displayName]);res.status(201).json({token:signToken(r.rows[0]),user:r.rows[0]})}catch(e){if(e.code==='23505')return res.status(409).json({error:'帳號已被使用'});throw e}}));
 app.post('/api/auth/login',asyncRoute(async(req,res)=>{const r=await pool.query('SELECT * FROM users WHERE username=$1',[String(req.body.username||'').trim()]),u=r.rows[0];if(!u||!(await bcrypt.compare(String(req.body.password||''),u.password_hash)))return res.status(401).json({error:'帳號或密碼錯誤'});res.json({token:signToken(u),user:{id:u.id,username:u.username,display_name:u.display_name,role:u.role,stamps:u.stamps,avatar_url:u.avatar_url}})}));
 app.get('/api/me',auth(),asyncRoute(async(req,res)=>{const r=await pool.query('SELECT id,username,display_name,role,stamps,avatar_url,created_at FROM users WHERE id=$1',[req.user.id]);res.json(r.rows[0])}));
